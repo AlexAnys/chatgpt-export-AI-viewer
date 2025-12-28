@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>记忆星图 · ChatGPT 对话洞察</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="hero panel animate-in">
+        <div class="hero-text">
+          <p class="eyebrow">Chat Archive Atlas</p>
+          <h1>记忆星图</h1>
+          <p class="lead">
+            用搜索、时间轴和关键词，把零散的对话重新组织成可回看的知识网络。
+          </p>
+        </div>
+        <div class="hero-metrics">
+          <div class="metric">
+            <span class="metric-label">对话总数</span>
+            <span class="metric-value" id="metricTotal">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">时间跨度</span>
+            <span class="metric-value" id="metricRange">—</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">已标星</span>
+            <span class="metric-value" id="metricStarred">—</span>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button class="btn primary" id="randomBtn">随机漫游</button>
+          <button class="btn ghost" id="clearFiltersBtn">清除过滤</button>
+          <button class="btn ghost" id="exportGuideBtn">导出说明</button>
+        </div>
+      </header>
+
+      <main class="layout">
+        <aside class="panel filters animate-in" data-delay="80">
+          <div class="section">
+            <h2>检索</h2>
+            <label class="field">
+              <span>关键词 / 标题</span>
+              <input
+                type="search"
+                id="searchInput"
+                placeholder="例如：创业、AI、学习计划"
+              />
+            </label>
+          </div>
+
+          <div class="section">
+            <h2>时间</h2>
+            <div class="field-row">
+              <label class="field">
+                <span>开始</span>
+                <input type="date" id="startDate" />
+              </label>
+              <label class="field">
+                <span>结束</span>
+                <input type="date" id="endDate" />
+              </label>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>重要性</h2>
+            <label class="field">
+              <span>最少消息数</span>
+              <input type="range" id="minMessages" min="0" max="200" step="5" />
+              <div class="range-value" id="minMessagesValue">0+</div>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="onlyStarred" />
+              <span>只看标星</span>
+            </label>
+          </div>
+
+          <div class="section">
+            <h2>排序</h2>
+            <div class="segmented" id="sortControl">
+              <button data-sort="updated" class="active">最近更新</button>
+              <button data-sort="created">最早创建</button>
+              <button data-sort="messages">消息最多</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>主题</h2>
+            <div class="chip-group" id="clusterChips">
+              <span class="chip muted">加载中…</span>
+            </div>
+          </div>
+
+          <div class="section">
+            <h2>关键词</h2>
+            <div class="chip-group" id="keywordChips">
+              <span class="chip muted">加载中…</span>
+            </div>
+          </div>
+
+          <div class="section insights">
+            <h2>洞察面板</h2>
+            <div class="insight-block">
+              <h3>热词</h3>
+              <div class="insight-tags" id="insightKeywords">—</div>
+            </div>
+            <div class="insight-block">
+              <h3>对话节奏</h3>
+              <div class="timeline" id="insightTimeline"></div>
+            </div>
+            <div class="insight-block">
+              <h3>主题聚类</h3>
+              <div class="insight-tags" id="insightClusters">—</div>
+            </div>
+          </div>
+        </aside>
+
+        <section class="panel list animate-in" data-delay="140">
+          <div class="list-header">
+            <h2>对话列表</h2>
+            <div class="list-meta" id="listMeta">—</div>
+          </div>
+          <div class="list-items" id="conversationList"></div>
+        </section>
+
+        <section class="panel detail animate-in" data-delay="200">
+          <div class="detail-header">
+            <div>
+              <h2 id="detailTitle">请选择一条对话</h2>
+              <div class="detail-meta" id="detailMeta">—</div>
+            </div>
+            <div class="detail-actions">
+              <button class="btn ghost" id="openFileBtn" disabled>打开原文件</button>
+              <button class="btn ghost" id="starToggleBtn" disabled>标星</button>
+            </div>
+          </div>
+          <div class="notes">
+            <label class="field">
+              <span>灵感备注</span>
+              <textarea
+                id="noteInput"
+                rows="3"
+                placeholder="把重要结论或下一步行动写在这里"
+                disabled
+              ></textarea>
+            </label>
+          </div>
+          <div class="detail-insights">
+            <div class="detail-block">
+              <h3>关键摘录</h3>
+              <ul class="detail-list" id="detailHighlights"></ul>
+            </div>
+            <div class="detail-block">
+              <h3>相似对话</h3>
+              <div class="detail-similar" id="detailSimilar"></div>
+            </div>
+          </div>
+          <div class="detail-body" id="conversationDetail">
+            <div class="empty-state">从左侧选择一条对话开始浏览。</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <noscript>需要启用 JavaScript 才能浏览对话内容。</noscript>
+    <script src="app.js" defer></script>
+  </body>
+</html>
