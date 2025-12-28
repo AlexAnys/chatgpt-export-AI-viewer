@@ -10,6 +10,7 @@ Run:
 ```
 python tools/build_data.py --source chatgpt --input /path/to/conversations.json
 ```
+You can also pass the exported ZIP or a folder containing `conversations.json`.
 
 ## Other providers
 Export your conversation history and convert it to the generic JSON schema in

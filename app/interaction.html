@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-Hans">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>交互能力报告 · Chat Archive Atlas</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="hero panel">
+        <div class="hero-text">
+          <p class="eyebrow">Interaction Report</p>
+          <h1>交互能力报告</h1>
+          <p class="lead">
+            基于本地启发式分析，回顾你与 AI 的沟通习惯、优势与可提升点。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="btn ghost" id="backBtn">返回看板</button>
+        </div>
+      </header>
+
+      <main class="panel report">
+        <section class="report-section">
+          <h2>总体概览</h2>
+          <div class="report-metrics" id="reportMetrics"></div>
+          <p class="report-note" id="reportMethod">—</p>
+        </section>
+
+        <section class="report-section">
+          <h2>优势</h2>
+          <div class="report-list" id="reportStrengths"></div>
+        </section>
+
+        <section class="report-section">
+          <h2>可改进</h2>
+          <div class="report-list" id="reportGaps"></div>
+        </section>
+
+        <section class="report-section">
+          <h2>证据引用</h2>
+          <div class="report-quotes" id="reportQuotes"></div>
+        </section>
+
+        <section class="report-section">
+          <h2>AI 能力边界</h2>
+          <div class="report-quotes" id="reportBoundaries"></div>
+        </section>
+
+        <section class="report-section">
+          <h2>相似问题趋势</h2>
+          <div class="report-columns">
+            <div>
+              <h3>提升明显的主题</h3>
+              <div class="report-list" id="reportClusterUp"></div>
+            </div>
+            <div>
+              <h3>仍可提升的主题</h3>
+              <div class="report-list" id="reportClusterDown"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="interaction.js" defer></script>
+  </body>
+</html>

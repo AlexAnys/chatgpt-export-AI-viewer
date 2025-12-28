@@ -9,6 +9,7 @@ markdown + index data for the UI, including a search index.
 - Keyword highlights and topic clusters
 - Similar conversation suggestions
 - Local notes + stars stored in browser
+- Interaction ability report with strengths/gaps and evidence
 
 ## Quick start
 1) Export your data (see `docs/EXPORTS.md`).
@@ -16,6 +17,7 @@ markdown + index data for the UI, including a search index.
 ```
 python tools/build_data.py --source chatgpt --input /path/to/conversations.json
 ```
+You can also point to the exported ZIP or a folder that contains `conversations.json`.
 3) Serve locally:
 ```
 python -m http.server 8766 --directory .
@@ -24,6 +26,10 @@ python -m http.server 8766 --directory .
 ```
 http://localhost:8766/app/
 ```
+
+Optional flags:
+- `--include-all-nodes` to include all branches in ChatGPT conversations.
+- `--skip-interaction` to skip the interaction report.
 
 ## Other AI providers
 If your provider does not export in ChatGPT format, convert it to the generic JSON
@@ -35,6 +41,7 @@ python tools/build_data.py --source generic --input /path/to/generic.json
 ## Data privacy
 All processing is local. The generated data lives in `app/data/` and is ignored by Git.
 Do not commit private exports to a public repository.
+If you want GitHub Pages, use a small sanitized sample set instead of personal exports.
 
 ## GitHub publication
 If you want to publish the code:

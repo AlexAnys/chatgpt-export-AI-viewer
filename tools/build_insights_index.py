@@ -235,7 +235,52 @@ NOISE_TERMS = {
     "use",
 }
 
+TOOL_JSON_KEYS = {
+    "search_query",
+    "response_length",
+    "path",
+    "args",
+    "tool_calls",
+    "tool",
+    "function",
+    "call",
+}
+
 MAX_TEXT_CHARS_FOR_TERMS = 12000
+TURN_TOKEN_RE = re.compile(
+    r"^turn\d+(?:search|news|view|file|calc|code|media)\d+$", re.IGNORECASE
+)
+SHORT_ID_RE = re.compile(r"^[a-z]{1,2}\d{1,4}$", re.IGNORECASE)
+MIXED_ID_RE = re.compile(r"^[a-z]{1,3}\d{3,}$", re.IGNORECASE)
+REQUEST_RE = re.compile(
+    r"(请|帮我|帮忙|如何|怎么|为什么|能否|可否|请问|怎么做|how|what|why|can you|could you)",
+    re.IGNORECASE,
+)
+CONTEXT_RE = re.compile(
+    r"(背景|情况|我现在|我目前|我在|我是|我的|目标|需求|现状|因为|场景|计划|打算)",
+    re.IGNORECASE,
+)
+CONSTRAINT_RE = re.compile(
+    r"(预算|限制|必须|不要|不想|至少|最多|以内|以上|不超过|不高于|不低于|prefer|limit|budget|must|only)",
+    re.IGNORECASE,
+)
+UNIT_RE = re.compile(
+    r"\d+\s?(元|美元|￥|¥|%|小时|分钟|天|周|月|年|km|公里|m|mb|gb|k|w|万|usd|rmb|dollar|day|hour|min)",
+    re.IGNORECASE,
+)
+STRUCTURE_RE = re.compile(r"^\s*(?:[-*•]|\d+[\\.、)])", re.MULTILINE)
+FEEDBACK_RE = re.compile(
+    r"(不对|错误|更正|调整|修改|改成|再|继续|太长|太短|不够|不太|不满意|优化|精简|补充|不是|改一下)",
+    re.IGNORECASE,
+)
+BOUNDARY_RE = re.compile(
+    r"(无法|不能|不支持|不便|不会|我不能|我无法|无法访问|无法浏览|没有实时|不具备|无法提供|as an ai|i can't|i cannot|i don't have access|i do not have access)",
+    re.IGNORECASE,
+)
+CLARIFY_RE = re.compile(
+    r"(请提供|需要更多|能否提供|请补充|还需要|更多信息|具体一点|进一步说明)",
+    re.IGNORECASE,
+)
 
 # 这些词可以用于“主题命中”，但不应当作为关键词/主题标签直接展示（太像代码/文件噪声）。
 KEYWORD_BLACKLIST = {
@@ -473,6 +518,71 @@ TOPIC_RULES = [
         },
     ),
     (
+        "学习教育",
+        {
+            "学习",
+            "课程",
+            "作业",
+            "论文",
+            "考试",
+            "申请",
+            "学校",
+            "大学",
+            "留学",
+            "课表",
+            "学分",
+            "项目",
+            "study",
+            "course",
+            "assignment",
+            "exam",
+            "university",
+        },
+    ),
+    (
+        "出行旅行",
+        {
+            "旅行",
+            "行程",
+            "路线",
+            "攻略",
+            "机票",
+            "航班",
+            "酒店",
+            "签证",
+            "租车",
+            "景点",
+            "travel",
+            "flight",
+            "hotel",
+            "visa",
+            "itinerary",
+        },
+    ),
+    (
+        "生活服务",
+        {
+            "租房",
+            "住房",
+            "房东",
+            "保险",
+            "医疗",
+            "银行",
+            "税务",
+            "购物",
+            "餐厅",
+            "交通",
+            "手机",
+            "居住",
+            "生活",
+            "service",
+            "insurance",
+            "rent",
+            "housing",
+            "tax",
+        },
+    ),
+    (
         "健康运动",
         {
             "运动",
@@ -546,6 +656,15 @@ DOMAIN_ZH_TERMS = {
     "血压",
     "血脂",
     "心率",
+    # 教育/出行/生活
+    "留学",
+    "课程",
+    "考试",
+    "机票",
+    "航班",
+    "签证",
+    "租房",
+    "保险",
 }
 
 FILE_TOKEN_RE = re.compile(
@@ -678,6 +797,454 @@ def strip_artifact_lines(text):
     return "\n".join(kept)
 
 
+def base_role(role_label):
+    if not role_label:
+        return ""
+    return role_label.split(" ")[0].split(":")[0].strip().lower()
+
+
+def is_tool_call_block(text):
+    stripped = text.strip()
+    if not stripped:
+        return False
+    payload = stripped
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if not lines:
+            return False
+        fence = lines[0].strip()
+        if not fence.startswith("```"):
+            return False
+        lang = fence[3:].strip().lower()
+        if lang and lang != "unknown":
+            return False
+        if len(lines) < 2:
+            return False
+        if not lines[-1].strip().startswith("```"):
+            return False
+        payload = "\n".join(lines[1:-1]).strip()
+        if not payload:
+            return False
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    return any(key in obj for key in TOOL_JSON_KEYS)
+
+
+def clean_for_metrics(text):
+    cleaned = normalize_body(text, keep_code=False)
+    cleaned = strip_artifact_lines(cleaned)
+    return cleaned.strip()
+
+
+def analyze_user_message(text):
+    compact = re.sub(r"\s+", " ", text).strip()
+    char_len = len(compact.replace(" ", ""))
+    word_len = len(re.findall(r"[A-Za-z0-9']+", compact))
+    has_question = "?" in compact or "？" in compact
+    has_request = bool(REQUEST_RE.search(compact))
+    has_structure = bool(STRUCTURE_RE.search(compact))
+    has_numbers = bool(re.search(r"\d", compact))
+    has_constraints = bool(CONSTRAINT_RE.search(compact) or UNIT_RE.search(compact))
+    has_context = bool(CONTEXT_RE.search(compact) or char_len >= 35)
+    has_feedback = bool(FEEDBACK_RE.search(compact))
+    clear = has_question or has_request or has_structure or char_len >= 18 or word_len >= 6
+    vague = char_len < 12 and not has_question and not has_constraints and not has_context
+    return {
+        "text": compact,
+        "char_len": char_len,
+        "clear": clear,
+        "constraint": has_constraints or (has_numbers and char_len >= 12),
+        "context": has_context,
+        "feedback": has_feedback,
+        "vague": vague,
+    }
+
+
+def truncate_text(text, limit=180):
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def push_quote(bucket, quote, limit=60):
+    bucket.append(quote)
+    if len(bucket) <= limit:
+        return
+    bucket.sort(key=lambda item: (-item.get("score", 0), item.get("text", "")))
+    del bucket[limit:]
+
+
+def analyze_conversation(messages, file_path, created_utc, totals, quote_buckets, boundary_quotes):
+    user_msgs = []
+    assistant_msgs = []
+    for msg in messages:
+        role = base_role(msg.get("role"))
+        body = msg.get("body") or ""
+        if is_tool_call_block(body):
+            continue
+        cleaned = clean_for_metrics(body)
+        if not cleaned:
+            continue
+        if role == "user":
+            user_msgs.append(cleaned)
+        elif role == "assistant":
+            assistant_msgs.append(cleaned)
+
+    if not user_msgs and not assistant_msgs:
+        return None
+
+    totals["conversations"] += 1
+    totals["user_messages"] += len(user_msgs)
+    totals["assistant_messages"] += len(assistant_msgs)
+    totals["user_chars"] += sum(len(text.replace(" ", "")) for text in user_msgs)
+    totals["assistant_chars"] += sum(
+        len(text.replace(" ", "")) for text in assistant_msgs
+    )
+
+    for text in assistant_msgs:
+        if CLARIFY_RE.search(text):
+            totals["clarify_hits"] += 1
+        if BOUNDARY_RE.search(text):
+            push_quote(
+                boundary_quotes,
+                {
+                    "text": truncate_text(text),
+                    "file": file_path,
+                    "score": len(text),
+                },
+                limit=40,
+            )
+
+    clear_hits = 0
+    constraint_hits = 0
+    context_hits = 0
+    feedback_hits = 0
+    vague_hits = 0
+    for text in user_msgs:
+        metrics = analyze_user_message(text)
+        if metrics["clear"]:
+            clear_hits += 1
+            totals["clarity_hits"] += 1
+            push_quote(
+                quote_buckets["clarity"],
+                {
+                    "text": truncate_text(metrics["text"]),
+                    "file": file_path,
+                    "score": metrics["char_len"],
+                },
+            )
+        if metrics["constraint"]:
+            constraint_hits += 1
+            totals["constraint_hits"] += 1
+            push_quote(
+                quote_buckets["constraint"],
+                {
+                    "text": truncate_text(metrics["text"]),
+                    "file": file_path,
+                    "score": metrics["char_len"],
+                },
+            )
+        if metrics["context"]:
+            context_hits += 1
+            totals["context_hits"] += 1
+            push_quote(
+                quote_buckets["context"],
+                {
+                    "text": truncate_text(metrics["text"]),
+                    "file": file_path,
+                    "score": metrics["char_len"],
+                },
+            )
+        if metrics["feedback"]:
+            feedback_hits += 1
+            totals["feedback_hits"] += 1
+            push_quote(
+                quote_buckets["feedback"],
+                {
+                    "text": truncate_text(metrics["text"]),
+                    "file": file_path,
+                    "score": metrics["char_len"],
+                },
+            )
+        if metrics["vague"]:
+            vague_hits += 1
+            push_quote(
+                quote_buckets["vague"],
+                {
+                    "text": truncate_text(metrics["text"]),
+                    "file": file_path,
+                    "score": 100 - metrics["char_len"],
+                },
+            )
+
+    user_count = max(1, len(user_msgs))
+    clarity_rate = clear_hits / user_count
+    constraint_rate = constraint_hits / user_count
+    context_rate = context_hits / user_count
+    feedback_rate = feedback_hits / user_count
+    iteration_flag = 1 if len(user_msgs) >= 2 else 0
+    if iteration_flag:
+        totals["iteration_conversations"] += 1
+
+    score = (
+        clarity_rate + constraint_rate + context_rate + feedback_rate + iteration_flag
+    ) / 5.0
+
+    return {
+        "file": file_path,
+        "created_utc": created_utc,
+        "user_messages": len(user_msgs),
+        "assistant_messages": len(assistant_msgs),
+        "clarity_rate": clarity_rate,
+        "constraint_rate": constraint_rate,
+        "context_rate": context_rate,
+        "feedback_rate": feedback_rate,
+        "iteration": iteration_flag,
+        "score": score,
+    }
+
+
+def compute_cluster_trends(items, interaction_records, min_points=6):
+    cluster_points = {}
+    for item in items:
+        file_path = item.get("file") or ""
+        record = interaction_records.get(file_path)
+        if not record:
+            continue
+        dt = parse_datetime(item.get("created_utc") or "")
+        if not dt:
+            continue
+        cluster = item.get("cluster_label") or "其他"
+        cluster_points.setdefault(cluster, []).append((dt, record["score"]))
+
+    improving = []
+    needs_work = []
+    for cluster, points in cluster_points.items():
+        if len(points) < min_points:
+            continue
+        points.sort(key=lambda pair: pair[0])
+        mid = len(points) // 2
+        if mid == 0 or mid == len(points):
+            continue
+        early_scores = [score for _, score in points[:mid]]
+        late_scores = [score for _, score in points[mid:]]
+        early_avg = sum(early_scores) / len(early_scores)
+        late_avg = sum(late_scores) / len(late_scores)
+        delta = late_avg - early_avg
+        entry = {
+            "label": cluster,
+            "delta": round(delta, 3),
+            "early": round(early_avg, 3),
+            "recent": round(late_avg, 3),
+            "count": len(points),
+        }
+        if delta >= 0.05:
+            improving.append(entry)
+        elif delta <= -0.05:
+            needs_work.append(entry)
+
+    improving.sort(key=lambda item: (-item["delta"], -item["count"]))
+    needs_work.sort(key=lambda item: (item["delta"], -item["count"]))
+    return {
+        "improving": improving[:4],
+        "needs_work": needs_work[:4],
+    }
+
+
+def build_interaction_report(items, interaction_records, totals, quote_buckets, boundary_quotes, generated_utc):
+    total_user = totals["user_messages"]
+    total_assistant = totals["assistant_messages"]
+    total_conversations = totals["conversations"]
+    if total_user <= 0:
+        return {
+            "generated_utc": generated_utc,
+            "summary": {},
+            "strengths": [],
+            "gaps": [],
+            "quotes": [],
+            "boundaries": [],
+            "cluster_trends": {"improving": [], "needs_work": []},
+            "method": "未找到可分析的用户消息。",
+        }
+
+    summary = {
+        "total_conversations": total_conversations,
+        "total_user_messages": total_user,
+        "clarity_avg": totals["clarity_hits"] / total_user,
+        "constraint_rate": totals["constraint_hits"] / total_user,
+        "context_rate": totals["context_hits"] / total_user,
+        "feedback_rate": totals["feedback_hits"] / total_user,
+        "iteration_rate": totals["iteration_conversations"] / max(1, total_conversations),
+        "clarification_rate": totals["clarify_hits"] / max(1, total_assistant),
+        "avg_user_chars": totals["user_chars"] / total_user,
+        "avg_turns": (total_user + total_assistant) / max(1, total_conversations),
+    }
+
+    strength_candidates = [
+        {
+            "label": "问题表达清晰",
+            "detail": "多数提问具备明确问题或结构。",
+            "metric": summary["clarity_avg"],
+            "threshold": 0.55,
+        },
+        {
+            "label": "善于提供约束条件",
+            "detail": "经常补充预算、范围或限制。",
+            "metric": summary["constraint_rate"],
+            "threshold": 0.3,
+        },
+        {
+            "label": "提供背景信息",
+            "detail": "能够补充场景与目标。",
+            "metric": summary["context_rate"],
+            "threshold": 0.3,
+        },
+        {
+            "label": "愿意迭代反馈",
+            "detail": "会根据回复提出调整或补充。",
+            "metric": summary["feedback_rate"],
+            "threshold": 0.12,
+        },
+        {
+            "label": "多轮推进问题",
+            "detail": "同一问题会继续追问深化。",
+            "metric": summary["iteration_rate"],
+            "threshold": 0.4,
+        },
+    ]
+    strengths = [
+        {
+            "label": item["label"],
+            "detail": item["detail"],
+            "metric": round(item["metric"], 3),
+        }
+        for item in strength_candidates
+        if item["metric"] >= item["threshold"]
+    ]
+    strengths.sort(key=lambda item: -item["metric"])
+    strengths = strengths[:3]
+
+    gap_candidates = [
+        {
+            "label": "问题表述偏简略",
+            "detail": "可以增加目标或具体场景。",
+            "metric": summary["clarity_avg"],
+            "threshold": 0.45,
+        },
+        {
+            "label": "约束条件不足",
+            "detail": "可补充预算、边界或时间范围。",
+            "metric": summary["constraint_rate"],
+            "threshold": 0.25,
+        },
+        {
+            "label": "背景信息偏少",
+            "detail": "适当补充现状与目标更利于输出。",
+            "metric": summary["context_rate"],
+            "threshold": 0.25,
+        },
+        {
+            "label": "反馈/迭代不足",
+            "detail": "可明确哪些部分需要调整。",
+            "metric": summary["feedback_rate"],
+            "threshold": 0.1,
+        },
+        {
+            "label": "追问频率偏低",
+            "detail": "多轮追问能提升输出质量。",
+            "metric": summary["iteration_rate"],
+            "threshold": 0.25,
+        },
+        {
+            "label": "AI 需要补充信息",
+            "detail": "可一次性提供关键背景。",
+            "metric": summary["clarification_rate"],
+            "threshold": 0.2,
+            "reverse": True,
+        },
+    ]
+    gaps = []
+    for item in gap_candidates:
+        threshold = item["threshold"]
+        metric = item["metric"]
+        if item.get("reverse"):
+            if metric >= threshold:
+                gaps.append(
+                    {
+                        "label": item["label"],
+                        "detail": item["detail"],
+                        "metric": round(metric, 3),
+                        "delta": round(metric - threshold, 3),
+                    }
+                )
+        else:
+            if metric < threshold:
+                gaps.append(
+                    {
+                        "label": item["label"],
+                        "detail": item["detail"],
+                        "metric": round(metric, 3),
+                        "delta": round(threshold - metric, 3),
+                    }
+                )
+    gaps.sort(key=lambda item: item.get("delta", 0), reverse=True)
+    gaps = gaps[:3]
+
+    quote_order = [
+        ("clarity", "清晰提问"),
+        ("constraint", "给出约束"),
+        ("context", "补充背景"),
+        ("feedback", "迭代反馈"),
+        ("vague", "问题偏简略"),
+    ]
+    quotes = []
+    used_files = set()
+    for key, label in quote_order:
+        bucket = quote_buckets.get(key) or []
+        if not bucket:
+            continue
+        bucket.sort(key=lambda item: (-item.get("score", 0), item.get("text", "")))
+        for candidate in bucket:
+            if candidate["file"] in used_files:
+                continue
+            quotes.append(
+                {
+                    "label": label,
+                    "text": candidate["text"],
+                    "file": candidate["file"],
+                }
+            )
+            used_files.add(candidate["file"])
+            break
+        if len(quotes) >= 5:
+            break
+
+    boundary_quotes.sort(
+        key=lambda item: (-item.get("score", 0), item.get("text", ""))
+    )
+    boundaries = [
+        {"label": "能力边界提示", "text": item["text"], "file": item["file"]}
+        for item in boundary_quotes[:4]
+    ]
+
+    cluster_trends = compute_cluster_trends(items, interaction_records)
+
+    return {
+        "generated_utc": generated_utc,
+        "summary": summary,
+        "strengths": strengths,
+        "gaps": gaps,
+        "quotes": quotes,
+        "boundaries": boundaries,
+        "cluster_trends": cluster_trends,
+        "method": "启发式分析基于本地对话文本，不上传任何数据。",
+    }
+
+
 def extract_highlights(messages, limit=8):
     candidates = []
     seen = set()
@@ -743,6 +1310,8 @@ def normalize_term(term):
     mapped = TERM_ALIASES.get(lower) or TERM_ALIASES.get(t) or t
     # 归一后再做 stopwords/noise 过滤（英文以 lower 判断）
     mapped_lower = mapped.lower()
+    if is_noise_term(mapped):
+        return None
     if mapped_lower in EN_STOPWORDS or mapped_lower in NOISE_TERMS:
         return None
     if mapped in ZH_STOPWORDS:
@@ -760,6 +1329,21 @@ def normalize_term(term):
     return mapped
 
 
+def is_noise_term(term):
+    if not term:
+        return True
+    lower = term.lower()
+    if lower in NOISE_TERMS:
+        return True
+    if TURN_TOKEN_RE.match(lower):
+        return True
+    if SHORT_ID_RE.match(lower):
+        return True
+    if MIXED_ID_RE.match(lower):
+        return True
+    return False
+
+
 def iter_zh_ngrams(seq, min_len=2, max_len=4):
     length = len(seq)
     for n in range(min_len, max_len + 1):
@@ -769,7 +1353,7 @@ def iter_zh_ngrams(seq, min_len=2, max_len=4):
             yield seq[i : i + n]
 
 
-def build_zh_vocab(texts, min_df=3, max_df_ratio=0.35):
+def build_zh_vocab(texts, min_df=None, max_df_ratio=0.35):
     """用语料自举一个 2~4 字的中文词表，用于最大匹配分词。"""
     df = Counter()
     for text in texts:
@@ -788,6 +1372,8 @@ def build_zh_vocab(texts, min_df=3, max_df_ratio=0.35):
         for term in seen:
             df[term] += 1
     total = max(1, len(texts))
+    if min_df is None:
+        min_df = 2 if total < 80 else 3
     max_df = int(total * max_df_ratio)
     vocab = {t for t, c in df.items() if c >= min_df and c <= max_df}
     vocab |= set(DOMAIN_ZH_TERMS)
@@ -874,6 +1460,8 @@ def is_good_keyword(term, doc_freq, total_docs):
     lower = term.lower()
     if lower in KEYWORD_BLACKLIST:
         return False
+    if is_noise_term(term):
+        return False
     if term in ZH_STOPWORDS:
         return False
     if lower in EN_STOPWORDS or lower in NOISE_TERMS:
@@ -911,7 +1499,7 @@ def tfidf_keywords(term_counts, idf, doc_freq, total_docs, limit=8):
     return [term for _, _, term in scored[:limit]]
 
 
-def assign_topic_label(term_counts, fallback_keywords, doc_freq, min_fallback_df=12):
+def assign_topic_label(term_counts, fallback_keywords, doc_freq, total_docs, min_fallback_df=None):
     # 用小规则优先聚合到“大类”
     # 为了兼容大小写，把 term 统一成 lower 做命中
     lower_counts = Counter()
@@ -931,10 +1519,14 @@ def assign_topic_label(term_counts, fallback_keywords, doc_freq, min_fallback_df
         return best_label
 
     # 否则尝试用一个“比较常见”的关键词当主题（减少“其他”）
+    if min_fallback_df is None:
+        min_fallback_df = 3 if total_docs < 100 else max(8, int(total_docs * 0.005))
     for kw in fallback_keywords:
         if not kw:
             continue
         if kw.lower() in KEYWORD_BLACKLIST:
+            continue
+        if not is_good_keyword(kw, doc_freq, total_docs):
             continue
         if doc_freq.get(kw, 0) >= min_fallback_df:
             return kw
@@ -971,12 +1563,35 @@ def build_index(
     search_max_chars=8000,
     search_shard_size=300,
     include_search_text=False,
+    interaction_out=None,
 ):
     items = []
     month_counts = Counter()
     term_texts = []
     raw_rows = []
     search_entries = []
+    interaction_records = {}
+    interaction_totals = {
+        "conversations": 0,
+        "user_messages": 0,
+        "assistant_messages": 0,
+        "clarity_hits": 0,
+        "constraint_hits": 0,
+        "context_hits": 0,
+        "feedback_hits": 0,
+        "clarify_hits": 0,
+        "iteration_conversations": 0,
+        "user_chars": 0,
+        "assistant_chars": 0,
+    }
+    quote_buckets = {
+        "clarity": [],
+        "constraint": [],
+        "context": [],
+        "feedback": [],
+        "vague": [],
+    }
+    boundary_quotes = []
     csv_dir = os.path.dirname(os.path.abspath(csv_path))
     if not root_dir:
         root_dir = csv_dir
@@ -1006,6 +1621,16 @@ def build_index(
                 month_counts[dt.strftime("%Y-%m")] += 1
 
             file_path = os.path.join(file_root, rel_file) if rel_file else ""
+            record = analyze_conversation(
+                messages,
+                file_path.replace("\\", "/"),
+                created,
+                interaction_totals,
+                quote_buckets,
+                boundary_quotes,
+            )
+            if record:
+                interaction_records[file_path.replace("\\", "/")] = record
 
             item = {
                 "index": int(row.get("index") or 0),
@@ -1053,7 +1678,7 @@ def build_index(
     for item, counts in zip(items, doc_term_counts):
         keywords = tfidf_keywords(counts, idf, doc_freq, total_docs, limit=8)
         item["keywords"] = keywords
-        item["cluster_label"] = assign_topic_label(counts, keywords, doc_freq)
+        item["cluster_label"] = assign_topic_label(counts, keywords, doc_freq, total_docs)
 
     cluster_counts = Counter(item.get("cluster_label") or "其他" for item in items)
     clusters = [
@@ -1116,6 +1741,20 @@ def build_index(
 
     if search_index_dir is not None:
         write_search_index(search_index_dir, search_entries, search_shard_size, generated_utc)
+    if interaction_out:
+        interaction_payload = build_interaction_report(
+            items,
+            interaction_records,
+            interaction_totals,
+            quote_buckets,
+            boundary_quotes,
+            generated_utc,
+        )
+        interaction_dir = os.path.dirname(interaction_out)
+        if interaction_dir:
+            os.makedirs(interaction_dir, exist_ok=True)
+        with open(interaction_out, "w", encoding="utf-8") as f:
+            json.dump(interaction_payload, f, ensure_ascii=False, indent=2)
 
 
 def main():
@@ -1163,6 +1802,11 @@ def main():
         help="Include search_text inside index.json (not recommended for large datasets)",
     )
     parser.add_argument(
+        "--interaction-out",
+        default="app/data/interaction.json",
+        help="Output path for interaction analysis JSON (set empty to skip)",
+    )
+    parser.add_argument(
         "--snippet-len",
         type=int,
         default=240,
@@ -1171,6 +1815,7 @@ def main():
     args = parser.parse_args()
 
     search_dir = args.search_index_dir or None
+    interaction_out = args.interaction_out or None
     build_index(
         args.csv,
         args.root,
@@ -1181,6 +1826,7 @@ def main():
         search_max_chars=args.search_max_chars,
         search_shard_size=args.search_shard_size,
         include_search_text=args.include_search_text,
+        interaction_out=interaction_out,
     )
     print(f"Wrote {args.out}")
 

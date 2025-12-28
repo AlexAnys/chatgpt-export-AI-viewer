@@ -16,6 +16,17 @@ SKIP_CONTENT_TYPES = {
     "user_editable_context",
 }
 
+TOOL_JSON_KEYS = {
+    "search_query",
+    "response_length",
+    "path",
+    "args",
+    "tool_calls",
+    "tool",
+    "function",
+    "call",
+}
+
 
 def format_ts(ts):
     if not ts:
@@ -217,6 +228,8 @@ def render_message(node, keep_hidden=False, keep_system=False, keep_metadata=Fal
     body = render_content(content, keep_metadata=keep_metadata)
     if not body.strip():
         return None
+    if is_tool_call_block(body):
+        return None
 
     name = author.get("name")
     role_label = role if not name else f"{role}:{name}"
@@ -225,6 +238,37 @@ def render_message(node, keep_hidden=False, keep_system=False, keep_metadata=Fal
     if time_label != "unknown":
         role_label = f"{role_label} ({time_label})"
     return role_label, body
+
+
+def is_tool_call_block(text):
+    stripped = text.strip()
+    if not stripped:
+        return False
+    payload = stripped
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if not lines:
+            return False
+        fence = lines[0].strip()
+        if not fence.startswith("```"):
+            return False
+        lang = fence[3:].strip().lower()
+        if lang and lang != "unknown":
+            return False
+        if len(lines) < 2:
+            return False
+        if not lines[-1].strip().startswith("```"):
+            return False
+        payload = "\n".join(lines[1:-1]).strip()
+        if not payload:
+            return False
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    return any(key in obj for key in TOOL_JSON_KEYS)
 
 
 def build_conversation_files(

@@ -5,10 +5,24 @@ import json
 import os
 import re
 import sys
+import tempfile
+import zipfile
 from datetime import datetime, timezone
 
 from build_insights_index import build_index
 from prepare_cursor_browse import build_conversation_files
+
+
+TOOL_JSON_KEYS = {
+    "search_query",
+    "response_length",
+    "path",
+    "args",
+    "tool_calls",
+    "tool",
+    "function",
+    "call",
+}
 
 
 def format_ts(value):
@@ -40,6 +54,39 @@ def normalize_content(content):
     if isinstance(content, list):
         return "\n".join([normalize_content(item) for item in content if item])
     return json.dumps(content, ensure_ascii=False)
+
+
+def is_tool_call_block(text):
+    if not text or not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    payload = stripped
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if not lines:
+            return False
+        fence = lines[0].strip()
+        if not fence.startswith("```"):
+            return False
+        lang = fence[3:].strip().lower()
+        if lang and lang != "unknown":
+            return False
+        if len(lines) < 2:
+            return False
+        if not lines[-1].strip().startswith("```"):
+            return False
+        payload = "\n".join(lines[1:-1]).strip()
+        if not payload:
+            return False
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    return any(key in obj for key in TOOL_JSON_KEYS)
 
 
 def iter_generic_conversations(path):
@@ -106,6 +153,8 @@ def build_generic_conversation_files(input_path, out_dir):
             for msg in messages:
                 role = (msg.get("role") or "unknown").strip()
                 body = normalize_content(msg.get("content") or msg.get("text"))
+                if is_tool_call_block(body):
+                    continue
                 timestamp = format_ts(msg.get("created_utc") or msg.get("created_at"))
                 role_label = role
                 if timestamp != "unknown":
@@ -146,6 +195,59 @@ def build_generic_conversation_files(input_path, out_dir):
             )
 
     return total
+
+
+def pick_largest(paths):
+    if not paths:
+        return None
+    return sorted(paths, key=lambda p: (-os.path.getsize(p), p))[0]
+
+
+def resolve_input_path(input_path, source):
+    if os.path.isdir(input_path):
+        candidates = []
+        if source == "chatgpt":
+            names = {"conversations.json", "conversations.jsonl"}
+            for root, _, files in os.walk(input_path):
+                for name in files:
+                    if name in names:
+                        candidates.append(os.path.join(root, name))
+        else:
+            for root, _, files in os.walk(input_path):
+                for name in files:
+                    if name.lower().endswith((".json", ".jsonl")):
+                        candidates.append(os.path.join(root, name))
+        picked = pick_largest(candidates)
+        if picked:
+            return picked
+        raise FileNotFoundError(f"No export JSON found in directory: {input_path}")
+
+    if not input_path.lower().endswith(".zip"):
+        return input_path
+
+    temp_dir = tempfile.TemporaryDirectory()
+    zip_path = input_path
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        members = [info for info in zf.infolist() if not info.is_dir()]
+        if source == "chatgpt":
+            candidates = [
+                info
+                for info in members
+                if os.path.basename(info.filename) in {"conversations.json", "conversations.jsonl"}
+            ]
+        else:
+            candidates = [
+                info
+                for info in members
+                if info.filename.lower().endswith((".json", ".jsonl"))
+            ]
+        if not candidates:
+            temp_dir.cleanup()
+            raise FileNotFoundError(f"No export JSON found in zip: {zip_path}")
+        candidates.sort(key=lambda info: (-info.file_size, info.filename))
+        target = candidates[0]
+        extracted = zf.extract(target, temp_dir.name)
+    return extracted, temp_dir
 
 
 def main():
@@ -196,6 +298,11 @@ def main():
         help="Include search_text inside index.json (not recommended for large datasets)",
     )
     parser.add_argument(
+        "--skip-interaction",
+        action="store_true",
+        help="Skip interaction analysis output",
+    )
+    parser.add_argument(
         "--snippet-len",
         type=int,
         default=240,
@@ -225,23 +332,40 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    if args.source == "chatgpt":
-        total = build_conversation_files(
-            args.input,
-            args.out_dir,
-            keep_hidden=args.keep_hidden,
-            keep_system=args.keep_system,
-            keep_metadata=args.keep_metadata,
-            include_all_nodes=args.include_all_nodes,
-        )
-    else:
-        total = build_generic_conversation_files(args.input, args.out_dir)
+    try:
+        resolved = resolve_input_path(args.input, args.source)
+    except FileNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
+    temp_dir = None
+    input_path = resolved
+    if isinstance(resolved, tuple):
+        input_path, temp_dir = resolved
+
+    try:
+        if args.source == "chatgpt":
+            total = build_conversation_files(
+                input_path,
+                args.out_dir,
+                keep_hidden=args.keep_hidden,
+                keep_system=args.keep_system,
+                keep_metadata=args.keep_metadata,
+                include_all_nodes=args.include_all_nodes,
+            )
+        else:
+            total = build_generic_conversation_files(input_path, args.out_dir)
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
 
     csv_path = os.path.join(args.out_dir, "index.csv")
     out_path = os.path.join(args.out_dir, "index.json")
     search_dir = args.search_index_dir
     if search_dir is None:
         search_dir = os.path.join(args.out_dir, "search")
+    interaction_out = None
+    if not args.skip_interaction:
+        interaction_out = os.path.join(args.out_dir, "interaction.json")
     build_index(
         csv_path,
         args.out_dir,
@@ -252,6 +376,7 @@ def main():
         search_max_chars=args.search_max_chars,
         search_shard_size=args.search_shard_size,
         include_search_text=args.include_search_text,
+        interaction_out=interaction_out,
     )
     print(f"Built {total} conversations into {args.out_dir}")
 

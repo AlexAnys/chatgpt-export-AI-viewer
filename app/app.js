@@ -33,6 +33,7 @@ const state = {
   searchIndexLoaded: false,
   searchIndexLoading: false,
   searchIndexPromise: null,
+  interactionData: null,
 };
 
 const stars = new Set(JSON.parse(localStorage.getItem(STAR_KEY) || "[]"));
@@ -67,6 +68,11 @@ const els = {
   insightKeywords: document.getElementById("insightKeywords"),
   insightTimeline: document.getElementById("insightTimeline"),
   insightClusters: document.getElementById("insightClusters"),
+  interactionMetrics: document.getElementById("interactionMetrics"),
+  interactionStrengths: document.getElementById("interactionStrengths"),
+  interactionGaps: document.getElementById("interactionGaps"),
+  interactionQuotes: document.getElementById("interactionQuotes"),
+  interactionReportBtn: document.getElementById("interactionReportBtn"),
 };
 
 function parseDate(value) {
@@ -245,6 +251,82 @@ function renderInsights(insights) {
     tag.textContent = `${cluster.label} · ${cluster.count}`;
     els.insightClusters.appendChild(tag);
   });
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined) return "—";
+  return `${Math.round(value * 100)}%`;
+}
+
+function renderInteraction(data) {
+  if (!data) return;
+  const summary = data.summary || {};
+  const metrics = [
+    `清晰度 ${formatPercent(summary.clarity_avg)}`,
+    `约束率 ${formatPercent(summary.constraint_rate)}`,
+    `背景率 ${formatPercent(summary.context_rate)}`,
+    `迭代率 ${formatPercent(summary.iteration_rate)}`,
+    `反馈率 ${formatPercent(summary.feedback_rate)}`,
+  ];
+  els.interactionMetrics.textContent = metrics.join(" · ");
+
+  els.interactionStrengths.innerHTML = "";
+  (data.strengths || []).slice(0, 3).forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item.label;
+    els.interactionStrengths.appendChild(li);
+  });
+  if (!els.interactionStrengths.children.length) {
+    const li = document.createElement("li");
+    li.textContent = "暂无统计";
+    els.interactionStrengths.appendChild(li);
+  }
+
+  els.interactionGaps.innerHTML = "";
+  (data.gaps || []).slice(0, 3).forEach((item) => {
+    const li = document.createElement("li");
+    li.textContent = item.label;
+    els.interactionGaps.appendChild(li);
+  });
+  if (!els.interactionGaps.children.length) {
+    const li = document.createElement("li");
+    li.textContent = "暂无统计";
+    els.interactionGaps.appendChild(li);
+  }
+
+  els.interactionQuotes.innerHTML = "";
+  (data.quotes || []).slice(0, 3).forEach((quote) => {
+    const card = document.createElement("div");
+    card.className = "quote-card";
+    card.textContent = quote.text;
+    const meta = document.createElement("span");
+    meta.textContent = quote.label || "引用";
+    card.appendChild(meta);
+    card.addEventListener("click", () => {
+      if (quote.file) {
+        window.open(quote.file, "_blank");
+      }
+    });
+    els.interactionQuotes.appendChild(card);
+  });
+  if (!els.interactionQuotes.children.length) {
+    const card = document.createElement("div");
+    card.className = "quote-card";
+    card.textContent = "暂无引用";
+    els.interactionQuotes.appendChild(card);
+  }
+}
+
+async function loadInteractionData() {
+  try {
+    const response = await fetch("data/interaction.json");
+    if (!response.ok) throw new Error("interaction missing");
+    const data = await response.json();
+    state.interactionData = data;
+    renderInteraction(data);
+  } catch (error) {
+    els.interactionMetrics.textContent = "未找到交互分析数据";
+  }
 }
 
 async function loadSearchIndex() {
@@ -510,7 +592,8 @@ function cleanTextSegment(text) {
 
 function isToolCallBlock(segment) {
   if (!segment || segment.type !== "code") return false;
-  if (!segment.lang || segment.lang.toLowerCase() !== "unknown") return false;
+  const lang = (segment.lang || "").toLowerCase();
+  if (lang && lang !== "unknown") return false;
   const obj = safeJsonParse(segment.code.trim());
   if (!obj || typeof obj !== "object") return false;
   return Object.keys(obj).some((key) => TOOL_JSON_KEYS.has(key));
@@ -621,6 +704,9 @@ function bindEvents() {
   els.exportGuideBtn.addEventListener("click", () => {
     window.open("../docs/EXPORTS.md", "_blank");
   });
+  els.interactionReportBtn.addEventListener("click", () => {
+    window.open("interaction.html", "_blank");
+  });
   els.clearFiltersBtn.addEventListener("click", () => {
     state.search = "";
     state.startDate = "";
@@ -663,6 +749,7 @@ async function init() {
     renderKeywordChips(state.availableKeywords);
     renderClusterChips(state.availableClusters);
     applyFilters();
+    loadInteractionData();
   } catch (error) {
     els.conversationList.innerHTML =
       '<div class="empty-state">未找到索引数据。请先运行 <code>python tools/build_data.py --source chatgpt --input &lt;export&gt;</code> 生成 data/index.json。</div>';
