@@ -5,6 +5,7 @@
 2) `tools/build_data.py` converts exports into:
    - `app/data/conversations/*.md`
    - `app/data/index.json`
+   - `app/data/search/manifest.json` + shards
 3) `app/` reads `data/index.json` and lazily loads markdown per conversation.
 
 ## Key modules

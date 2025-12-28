@@ -1,4 +1,6 @@
 const DATA_PATH = "data/index.json";
+const SEARCH_MANIFEST_PATH = "data/search/manifest.json";
+const SEARCH_FALLBACK_PATH = "data/search.json";
 const STAR_KEY = "chat-insights-stars";
 const NOTE_KEY = "chat-insights-notes";
 const CITE_RE = /.*?/g;
@@ -27,6 +29,10 @@ const state = {
   endDate: "",
   minMessages: 0,
   onlyStarred: false,
+  searchIndexMap: null,
+  searchIndexLoaded: false,
+  searchIndexLoading: false,
+  searchIndexPromise: null,
 };
 
 const stars = new Set(JSON.parse(localStorage.getItem(STAR_KEY) || "[]"));
@@ -105,6 +111,10 @@ function applyFilters() {
   const start = state.startDate ? new Date(state.startDate) : null;
   const end = state.endDate ? new Date(state.endDate) : null;
 
+  if (terms.length && !state.searchIndexLoaded && !state.searchIndexLoading) {
+    ensureSearchIndex();
+  }
+
   state.filtered = state.items.filter((item) => {
     if (state.minMessages && item.messages < state.minMessages) return false;
     if (state.onlyStarred && !stars.has(item.file)) return false;
@@ -121,11 +131,13 @@ function applyFilters() {
     if (terms.length) {
       const title = item.title_lc || "";
       const keywords = item.keyword_text || "";
-      const searchText = item.search_text || "";
+      const snippet = item.snippet_lc || "";
+      const searchText = state.searchIndexMap?.get(item.file) || "";
       const matched = terms.every(
         (term) =>
           title.includes(term) ||
           keywords.includes(term) ||
+          snippet.includes(term) ||
           searchText.includes(term)
       );
       if (!matched) return false;
@@ -235,8 +247,46 @@ function renderInsights(insights) {
   });
 }
 
+async function loadSearchIndex() {
+  try {
+    let entries = [];
+    const manifestResp = await fetch(SEARCH_MANIFEST_PATH);
+    if (manifestResp.ok) {
+      const manifest = await manifestResp.json();
+      const shardPromises = (manifest.shards || []).map((shard) =>
+        fetch(`data/search/${shard.file}`).then((resp) => resp.json())
+      );
+      const shards = await Promise.all(shardPromises);
+      entries = shards.flatMap((shard) => shard.items || []);
+    } else {
+      const fallbackResp = await fetch(SEARCH_FALLBACK_PATH);
+      if (!fallbackResp.ok) throw new Error("search index missing");
+      const data = await fallbackResp.json();
+      entries = data.items || data || [];
+    }
+    state.searchIndexMap = new Map(
+      entries.map((entry) => [entry.file, entry.search_text || ""])
+    );
+    state.searchIndexLoaded = true;
+  } catch (error) {
+    state.searchIndexMap = new Map();
+    state.searchIndexLoaded = true;
+  } finally {
+    state.searchIndexLoading = false;
+    state.searchIndexPromise = null;
+    applyFilters();
+  }
+}
+
+function ensureSearchIndex() {
+  if (state.searchIndexLoaded || state.searchIndexLoading) return;
+  state.searchIndexLoading = true;
+  state.searchIndexPromise = loadSearchIndex();
+}
+
 function renderList() {
-  els.listMeta.textContent = `显示 ${state.filtered.length} / ${state.items.length}`;
+  const loading = state.searchIndexLoading ? " · 搜索索引加载中" : "";
+  els.listMeta.textContent = `显示 ${state.filtered.length} / ${state.items.length}${loading}`;
   els.conversationList.innerHTML = "";
   const fragment = document.createDocumentFragment();
   state.filtered.forEach((item) => {
@@ -409,6 +459,17 @@ function parseConversation(raw) {
     }
   }
   const body = lines.slice(start).join("\n");
+  if (body.includes("<!-- MSG role:")) {
+    const matches = [
+      ...body.matchAll(
+        /<!-- MSG role: (.+?) -->\n(?:### .+?\n\n)?([\s\S]*?)\n<!-- \/MSG -->/g
+      ),
+    ];
+    return matches.map((match) => ({
+      role: match[1].trim(),
+      body: match[2].trim(),
+    }));
+  }
   const matches = [...body.matchAll(/^### (.+?)\n\n([\s\S]*?)(?=\n### |\n?$)/gm)];
   return matches.map((match) => ({
     role: match[1].trim(),
@@ -589,7 +650,7 @@ async function init() {
       ...item,
       title_lc: (item.title || "").toLowerCase(),
       keyword_text: (item.keywords || []).join(" ").toLowerCase(),
-      search_text: (item.search_text || "").toLowerCase(),
+      snippet_lc: (item.snippet || "").toLowerCase(),
       keyword_set: new Set(item.keywords || []),
     }));
     updateMetrics();

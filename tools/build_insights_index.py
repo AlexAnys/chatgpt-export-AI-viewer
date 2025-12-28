@@ -564,20 +564,33 @@ def parse_datetime(value):
 
 
 def parse_messages(md_text):
-    lines = md_text.splitlines()
+    text = md_text.replace("\r\n", "\n")
+    lines = text.split("\n")
     start_idx = 0
     for idx, line in enumerate(lines):
         if line.strip() == "---":
             start_idx = idx + 1
             break
     body = "\n".join(lines[start_idx:])
-    pattern = re.compile(r"^### (.+?)\n\n([\s\S]*?)(?=\n### |\Z)", re.MULTILINE)
     messages = []
+    if "<!-- MSG role:" in body:
+        pattern = re.compile(
+            r"<!-- MSG role: (.+?) -->\n(?:### .+?\n\n)?([\s\S]*?)\n<!-- /MSG -->",
+            re.MULTILINE,
+        )
+        for match in pattern.finditer(body):
+            role = match.group(1).strip()
+            content = match.group(2).strip()
+            if content:
+                messages.append({"role": role, "body": content})
+        return messages
+
+    pattern = re.compile(r"^### (.+?)\n\n([\s\S]*?)(?=\n### |\Z)", re.MULTILINE)
     for match in pattern.finditer(body):
         role = match.group(1).strip()
-        text = match.group(2).strip()
-        if text:
-            messages.append({"role": role, "body": text})
+        content = match.group(2).strip()
+        if content:
+            messages.append({"role": role, "body": content})
     return messages
 
 
@@ -928,11 +941,42 @@ def assign_topic_label(term_counts, fallback_keywords, doc_freq, min_fallback_df
     return "其他"
 
 
-def build_index(csv_path, root_dir, out_path, snippet_len, file_root):
+def write_search_index(out_dir, entries, shard_size, generated_utc):
+    os.makedirs(out_dir, exist_ok=True)
+    shards = []
+    if shard_size <= 0:
+        shard_size = len(entries) or 1
+    for idx in range(0, len(entries), shard_size):
+        shard_entries = entries[idx : idx + shard_size]
+        name = f"search_{idx // shard_size:04d}.json"
+        with open(os.path.join(out_dir, name), "w", encoding="utf-8") as f:
+            json.dump({"items": shard_entries}, f, ensure_ascii=False)
+        shards.append({"file": name, "count": len(shard_entries)})
+    manifest = {
+        "generated_utc": generated_utc,
+        "total": len(entries),
+        "shards": shards,
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+
+def build_index(
+    csv_path,
+    root_dir,
+    out_path,
+    snippet_len,
+    file_root,
+    search_index_dir=None,
+    search_max_chars=8000,
+    search_shard_size=300,
+    include_search_text=False,
+):
     items = []
     month_counts = Counter()
     term_texts = []
     raw_rows = []
+    search_entries = []
     csv_dir = os.path.dirname(os.path.abspath(csv_path))
     if not root_dir:
         root_dir = csv_dir
@@ -950,6 +994,9 @@ def build_index(csv_path, root_dir, out_path, snippet_len, file_root):
 
             text_plain = extract_text(messages, keep_code=False)
             search_text = extract_text(messages, keep_code=True)
+            search_text = re.sub(r"\s+", " ", search_text).lower().strip()
+            if search_max_chars and len(search_text) > search_max_chars:
+                search_text = search_text[:search_max_chars]
             snippet = text_plain[:snippet_len].strip()
             highlights = extract_highlights(messages)
 
@@ -960,20 +1007,28 @@ def build_index(csv_path, root_dir, out_path, snippet_len, file_root):
 
             file_path = os.path.join(file_root, rel_file) if rel_file else ""
 
-            items.append(
-                {
-                    "index": int(row.get("index") or 0),
-                    "title": row.get("title") or "Untitled",
-                    "created_utc": created,
-                    "updated_utc": row.get("updated_utc") or "",
-                    "messages": int(row.get("messages") or 0),
-                    "file": file_path.replace("\\", "/"),
-                    "snippet": snippet,
-                    "keywords": [],
-                    "search_text": re.sub(r"\s+", " ", search_text).lower().strip(),
-                    "highlights": highlights,
-                }
-            )
+            item = {
+                "index": int(row.get("index") or 0),
+                "title": row.get("title") or "Untitled",
+                "created_utc": created,
+                "updated_utc": row.get("updated_utc") or "",
+                "messages": int(row.get("messages") or 0),
+                "file": file_path.replace("\\", "/"),
+                "snippet": snippet,
+                "keywords": [],
+                "highlights": highlights,
+            }
+            if include_search_text:
+                item["search_text"] = search_text
+            items.append(item)
+            if search_index_dir is not None:
+                search_entries.append(
+                    {
+                        "file": file_path.replace("\\", "/"),
+                        "title": item["title"],
+                        "search_text": search_text,
+                    }
+                )
             term_texts.append(strip_artifact_lines(f"{row.get('title') or ''}\n{text_plain}"))
 
     # 1) 先自举中文词表，改善中文分词
@@ -1047,8 +1102,9 @@ def build_index(csv_path, root_dir, out_path, snippet_len, file_root):
         "clusters": clusters[:30],
     }
 
+    generated_utc = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     payload = {
-        "generated_utc": datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"),
+        "generated_utc": generated_utc,
         "total": len(items),
         "items": items,
         "insights": insights,
@@ -1057,6 +1113,9 @@ def build_index(csv_path, root_dir, out_path, snippet_len, file_root):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    if search_index_dir is not None:
+        write_search_index(search_index_dir, search_entries, search_shard_size, generated_utc)
 
 
 def main():
@@ -1082,6 +1141,28 @@ def main():
         help="File path prefix for index.json entries (relative to app root)",
     )
     parser.add_argument(
+        "--search-index-dir",
+        default="app/data/search",
+        help="Directory for search index shards (set to empty to skip)",
+    )
+    parser.add_argument(
+        "--search-max-chars",
+        type=int,
+        default=8000,
+        help="Max characters to keep per conversation for search text",
+    )
+    parser.add_argument(
+        "--search-shard-size",
+        type=int,
+        default=300,
+        help="Entries per search shard",
+    )
+    parser.add_argument(
+        "--include-search-text",
+        action="store_true",
+        help="Include search_text inside index.json (not recommended for large datasets)",
+    )
+    parser.add_argument(
         "--snippet-len",
         type=int,
         default=240,
@@ -1089,7 +1170,18 @@ def main():
     )
     args = parser.parse_args()
 
-    build_index(args.csv, args.root, args.out, args.snippet_len, args.file_root)
+    search_dir = args.search_index_dir or None
+    build_index(
+        args.csv,
+        args.root,
+        args.out,
+        args.snippet_len,
+        args.file_root,
+        search_index_dir=search_dir,
+        search_max_chars=args.search_max_chars,
+        search_shard_size=args.search_shard_size,
+        include_search_text=args.include_search_text,
+    )
     print(f"Wrote {args.out}")
 
 

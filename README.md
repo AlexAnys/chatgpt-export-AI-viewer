@@ -2,7 +2,7 @@
 
 Local-first app for exploring AI conversation exports with search, insights, and clustering.
 This repo ships a static dashboard plus a Python data pipeline that turns exports into
-markdown + index data for the UI.
+markdown + index data for the UI, including a search index.
 
 ## Features
 - Full-text search across conversation titles + content

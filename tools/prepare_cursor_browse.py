@@ -57,10 +57,58 @@ def iter_conversations(path):
             raise RuntimeError(f"jq failed with code {rc}: {err.strip()}")
         return
 
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    for item in data:
+    for item in iter_json_array(path):
         yield item
+
+
+def iter_json_array(path, chunk_size=1024 * 1024):
+    decoder = json.JSONDecoder()
+    buf = ""
+    started = False
+    idx = 0
+    with open(path, "r", encoding="utf-8") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            buf += chunk
+            if not started:
+                start = buf.find("[")
+                if start == -1:
+                    buf = buf[-1:]
+                    continue
+                idx = start + 1
+                started = True
+
+            while True:
+                while idx < len(buf) and buf[idx] in " \t\r\n,":
+                    idx += 1
+                if idx >= len(buf):
+                    break
+                if buf[idx] == "]":
+                    return
+                try:
+                    obj, end = decoder.raw_decode(buf, idx)
+                except json.JSONDecodeError:
+                    break
+                yield obj
+                idx = end
+            buf = buf[idx:]
+
+    if not started:
+        return
+    idx = 0
+    while True:
+        while idx < len(buf) and buf[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= len(buf) or buf[idx] == "]":
+            break
+        try:
+            obj, end = decoder.raw_decode(buf, idx)
+        except json.JSONDecodeError:
+            break
+        yield obj
+        idx = end
 
 
 def pick_path(mapping, current_node):
@@ -179,7 +227,14 @@ def render_message(node, keep_hidden=False, keep_system=False, keep_metadata=Fal
     return role_label, body
 
 
-def build_conversation_files(input_path, out_dir, keep_hidden=False, keep_system=False, keep_metadata=False):
+def build_conversation_files(
+    input_path,
+    out_dir,
+    keep_hidden=False,
+    keep_system=False,
+    keep_metadata=False,
+    include_all_nodes=False,
+):
     conv_dir = os.path.join(out_dir, "conversations")
     os.makedirs(conv_dir, exist_ok=True)
 
@@ -210,18 +265,35 @@ def build_conversation_files(input_path, out_dir, keep_hidden=False, keep_system
             update_time = format_ts(conv.get("update_time"))
 
             mapping = conv.get("mapping") or {}
-            path = pick_path(mapping, conv.get("current_node"))
-
             messages = []
-            for node in path:
-                rendered = render_message(
-                    node,
-                    keep_hidden=keep_hidden,
-                    keep_system=keep_system,
-                    keep_metadata=keep_metadata,
-                )
-                if rendered:
-                    messages.append(rendered)
+            if include_all_nodes:
+                collected = []
+                for node_id, node in mapping.items():
+                    msg = node.get("message")
+                    if not msg:
+                        continue
+                    rendered = render_message(
+                        node,
+                        keep_hidden=keep_hidden,
+                        keep_system=keep_system,
+                        keep_metadata=keep_metadata,
+                    )
+                    if rendered:
+                        created = msg.get("create_time") or 0
+                        collected.append((created, node_id, rendered))
+                collected.sort(key=lambda item: (item[0], item[1]))
+                messages = [entry[2] for entry in collected]
+            else:
+                path = pick_path(mapping, conv.get("current_node"))
+                for node in path:
+                    rendered = render_message(
+                        node,
+                        keep_hidden=keep_hidden,
+                        keep_system=keep_system,
+                        keep_metadata=keep_metadata,
+                    )
+                    if rendered:
+                        messages.append(rendered)
 
             date_prefix = "unknown"
             if conv.get("create_time"):
@@ -250,8 +322,10 @@ def build_conversation_files(input_path, out_dir, keep_hidden=False, keep_system
                 f.write(f"- messages: {len(messages)}\n")
                 f.write("\n---\n\n")
                 for role_label, body in messages:
+                    f.write(f"<!-- MSG role: {role_label} -->\n")
                     f.write(f"### {role_label}\n\n")
                     f.write(f"{body}\n\n")
+                    f.write("<!-- /MSG -->\n\n")
 
             index_md.write(
                 f"| {total} | {title} | {create_time} | {update_time} | {len(messages)} | {rel_path} |\n"
@@ -292,6 +366,11 @@ def main():
         action="store_true",
         help="Include metadata content types like thoughts",
     )
+    parser.add_argument(
+        "--include-all-nodes",
+        action="store_true",
+        help="Include all nodes in the conversation tree (not just the current path)",
+    )
     args = parser.parse_args()
 
     total = build_conversation_files(
@@ -300,6 +379,7 @@ def main():
         keep_hidden=args.keep_hidden,
         keep_system=args.keep_system,
         keep_metadata=args.keep_metadata,
+        include_all_nodes=args.include_all_nodes,
     )
     print(f"Processed {total} conversations into {args.out_dir}")
 

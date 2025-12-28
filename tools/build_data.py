@@ -133,8 +133,10 @@ def build_generic_conversation_files(input_path, out_dir):
                 f.write(f"- messages: {len(rendered)}\n")
                 f.write("\n---\n\n")
                 for role_label, body in rendered:
+                    f.write(f"<!-- MSG role: {role_label} -->\n")
                     f.write(f"### {role_label}\n\n")
                     f.write(f"{body}\n\n")
+                    f.write("<!-- /MSG -->\n\n")
 
             index_md.write(
                 f"| {total} | {title} | {created} | {updated} | {len(rendered)} | {rel_path} |\n"
@@ -172,6 +174,28 @@ def main():
         help="File path prefix for app index entries (relative to app root)",
     )
     parser.add_argument(
+        "--search-index-dir",
+        default=None,
+        help="Directory for search index shards (default: <out-dir>/search)",
+    )
+    parser.add_argument(
+        "--search-max-chars",
+        type=int,
+        default=8000,
+        help="Max characters to keep per conversation for search text",
+    )
+    parser.add_argument(
+        "--search-shard-size",
+        type=int,
+        default=300,
+        help="Entries per search shard",
+    )
+    parser.add_argument(
+        "--include-search-text",
+        action="store_true",
+        help="Include search_text inside index.json (not recommended for large datasets)",
+    )
+    parser.add_argument(
         "--snippet-len",
         type=int,
         default=240,
@@ -192,6 +216,11 @@ def main():
         action="store_true",
         help="Include metadata content types like thoughts (ChatGPT only)",
     )
+    parser.add_argument(
+        "--include-all-nodes",
+        action="store_true",
+        help="Include all nodes in the conversation tree (ChatGPT only)",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -203,13 +232,27 @@ def main():
             keep_hidden=args.keep_hidden,
             keep_system=args.keep_system,
             keep_metadata=args.keep_metadata,
+            include_all_nodes=args.include_all_nodes,
         )
     else:
         total = build_generic_conversation_files(args.input, args.out_dir)
 
     csv_path = os.path.join(args.out_dir, "index.csv")
     out_path = os.path.join(args.out_dir, "index.json")
-    build_index(csv_path, args.out_dir, out_path, args.snippet_len, args.file_root)
+    search_dir = args.search_index_dir
+    if search_dir is None:
+        search_dir = os.path.join(args.out_dir, "search")
+    build_index(
+        csv_path,
+        args.out_dir,
+        out_path,
+        args.snippet_len,
+        args.file_root,
+        search_index_dir=search_dir,
+        search_max_chars=args.search_max_chars,
+        search_shard_size=args.search_shard_size,
+        include_search_text=args.include_search_text,
+    )
     print(f"Built {total} conversations into {args.out_dir}")
 
 
